@@ -150,41 +150,35 @@ def update_display(counter):
         return
     
     try:
-        # Clear the display to start fresh
-        oled.clear()
-        
-        # Show a title for this screen
-        oled.add_text("Temperature")
-        
-        # Show the temperature if available
-        if bmp_available:
-            temp_f = bmp_sensor.get_temperature()
-            oled.add_text(f"{temp_f} F")
-        else:
-            oled.add_text("Sensor offline")
-            
-        # Show the counter as well
-        oled.add_text(f"Count: {counter}")
-        
-        # === ADD MORE SCREENS HERE ===
-        # To add more screens, you can use the counter to decide 
-        # which screen to show. For example:
-        #
-        # if counter % 3 == 0:
-        #     # Show screen 1 (temperature)
-        #     oled.clear()
-        #     oled.add_text("Temperature")
-        #     ...
-        # elif counter % 3 == 1:
-        #     # Show screen 2 (pressure)
-        #     oled.clear()
-        #     oled.add_text("Pressure")
-        #     ...
-        # elif counter % 3 == 2:
-        #     # Show screen 3 (GPS)
-        #     oled.clear()
-        #     oled.add_text("GPS Data") 
-        #     ...
+        # define sensor output screens
+        if counter % 3 == 0:
+            # Show screen 1 (temperature)
+            oled.clear()
+            if bmp_available:
+                temp_f = bmp_sensor.get_temperature()
+                oled.add_text(f"{temp_f} F")
+            else:
+                oled.add_text("offline")
+            oled.add_text("Temperature")
+        elif counter % 3 == 1:
+            # Show screen 2 (pressure)
+            oled.clear()
+            if bmp_available:
+                oled.add_text(f"{bmp_sensor.get_altitude()} meters")
+
+            else:
+                oled.add_text("offline")
+            oled.add_text("Altitude")
+        elif counter % 3 == 2:
+            # Show screen 3 (GPS)
+            oled.clear()
+            if gps_available:
+                oled.add_text(f"{gps.get_location()}")
+                oled.add_text(f"Satellites: {gps.get_satellites()}")
+            else:
+                oled.add_text("offline")
+
+            oled.add_text("GPS Data") 
         
     except Exception as e:
         print(f"Error updating display: {e}")
