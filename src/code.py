@@ -4,9 +4,9 @@ import microcontroller
 import neopixel
 import time
 import busio
-import adafruit_bmp280
 from gps_module import GPSModule
-from simple_oled import SimpleOLED  # Import our simple OLED helper
+from simple_oled import SimpleOLED  
+from altitude_module import AltitudeSensor, celsius_to_fahrenheit
 
 # Initialize digital I/O
 led = digitalio.DigitalInOut(board.LED)
@@ -27,8 +27,7 @@ time.sleep(0.5)
 # Initialize the BMP sensor
 print("Initializing BMP280 sensor...")
 try:
-    bmp_sensor = adafruit_bmp280.Adafruit_BMP280_I2C(i2c)
-    bmp_sensor.sea_level_pressure = 1014.9
+    bmp_sensor = AltitudeSensor(i2c)
     print("BMP280 sensor initialized successfully")
     bmp_available = True
 except Exception as e:
@@ -59,9 +58,7 @@ except Exception as e:
     print(f"Error initializing OLED: {e}")
     oled_available = False
 
-def celsius_to_fahrenheit(temp_c):
-    temp_f = temp_c * (9/5) + 32
-    return int(temp_f)
+
 
 def print_bmp_sensor():
     if not bmp_available:
@@ -69,11 +66,9 @@ def print_bmp_sensor():
         return
     
     try:
-        outside_temp_f = celsius_to_fahrenheit(bmp_sensor.temperature)
-        print(f'Outside temp is: {outside_temp_f} degrees F')
-        print(f'Outside pressure is: {int(bmp_sensor.pressure)}hPa')
-        print(f'Altitude: {int(bmp_sensor.altitude)} meters')
-        return outside_temp_f
+        print(f'Outside temp is: {bmp_sensor.get_temperature()} degrees F')
+        print(f'Outside pressure is: {bmp_sensor.get_pressure()} hPa')
+        print(f'Altitude: {bmp_sensor.get_altitude()} meters')
     except Exception as e:
         print(f"Error reading BMP280: {e}")
         return None
@@ -163,7 +158,7 @@ def update_display(counter):
         
         # Show the temperature if available
         if bmp_available:
-            temp_f = celsius_to_fahrenheit(bmp_sensor.temperature)
+            temp_f = bmp_sensor.get_temperature()
             oled.add_text(f"{temp_f} F")
         else:
             oled.add_text("Sensor offline")
