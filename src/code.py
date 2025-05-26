@@ -4,9 +4,14 @@ import microcontroller
 import neopixel
 import time
 import busio
+import analogio
 from gps_module import GPSModule
 from simple_oled import SimpleOLED  
 from altitude_module import AltitudeSensor, celsius_to_fahrenheit
+from rockblock_module import SimpleRockBLOCK  # Your new module
+
+# Wait for I2C to be ready
+time.sleep(1.0)
 
 # Initialize digital I/O
 led = digitalio.DigitalInOut(board.LED)
@@ -15,14 +20,21 @@ led.direction = digitalio.Direction.OUTPUT
 # Initialize NeoPixel
 pixels = neopixel.NeoPixel(board.NEOPIXEL, 1)
 
+# Initialize battery voltage monitoring
+print("Initializing battery voltage monitor...")
+try:
+    battery_voltage = analogio.AnalogIn(board.A0)
+    print("Battery voltage monitor initialized on A0")
+    battery_available = True
+except Exception as e:
+    print(f"Error initializing battery monitor: {e}")
+    battery_available = False
+
 print("Starting initialization...")
 
 # Create I2C bus
 print("Initializing I2C bus...")
 i2c = board.I2C()  # Use the board's I2C bus
-
-# Wait for I2C to be ready
-time.sleep(0.5)
 
 # Initialize the BMP sensor
 print("Initializing BMP280 sensor...")
@@ -44,7 +56,7 @@ except Exception as e:
     print(f"Error initializing GPS: {e}")
     gps_available = False
 
-# Initialize OLED display - super easy now!
+# Initialize OLED display
 print("Initializing OLED display...")
 try:
     oled = SimpleOLED()
@@ -58,7 +70,34 @@ except Exception as e:
     print(f"Error initializing OLED: {e}")
     oled_available = False
 
+# Initialize RockBLOCK module
+print("Initializing RockBLOCK module..")
+try:
+    print("Sleeping 5.0 sec to let modem initialize.")
+    time.sleep(5.0)
+    rockblock = SimpleRockBLOCK(debug=True)
+    print("Sleeping 5.0 sec to let modem initialize.")
+    time.sleep(5.0)
+    print("RockBLOCK module initialized")
+    print(f"Model: {rockblock.model}")
+    print(f"IMEI: {rockblock.serial_number}")
+    rockblock_available = rockblock.available
+except Exception as e:
+    print(f"Error initializing RockBLOCK: {e}")
+    rockblock_available = False
+    rockblock = None
 
+def get_battery_voltage():
+    """Simple battery voltage reading."""
+    if not battery_available:
+        return None
+    
+    try:
+        # Read analog value and convert to voltage
+        voltage = (battery_voltage.value / 65535.0) * 3.3 
+        return voltage
+    except:
+        return None
 
 def print_bmp_sensor():
     if not bmp_available:
@@ -71,7 +110,6 @@ def print_bmp_sensor():
         print(f'Altitude: {bmp_sensor.get_altitude()} meters')
     except Exception as e:
         print(f"Error reading BMP280: {e}")
-        return None
 
 def print_cpu_temp():
     try:
@@ -79,6 +117,14 @@ def print_cpu_temp():
         print(f"The CPU temperature is {cpu_temp_fahrenheit} degrees F")
     except Exception as e:
         print(f"Error reading CPU temperature: {e}")
+
+def print_battery_info():
+    """Print battery voltage."""
+    voltage = get_battery_voltage()
+    if voltage:
+        print(f"Battery voltage: {voltage:.2f}V")
+    else:
+        print("Battery: not available")
 
 def print_gps_data():
     if not gps_available:
@@ -95,9 +141,9 @@ def print_gps_data():
             location = gps.get_location()
             if location:
                 lat, lon = location
-                print(f"GPS Position: {lat:.6f}, {lon:.6f}")
+                print(f"GPS Position: {lat:.6f}, {lon:.6f}") 
             
-            # Print altitude if available (this is separate from BMP280 altitude)
+            # Print altitude if available
             gps_altitude = gps.get_altitude()
             if gps_altitude is not None:
                 print(f"GPS Altitude: {int(gps_altitude)} meters")
@@ -116,43 +162,54 @@ def print_gps_data():
     except Exception as e:
         print(f"Error reading GPS data: {e}")
 
+def print_rockblock_info():
+    """Print just the current RockBLOCK status."""
+    if not rockblock_available:
+        print("RockBLOCK: offline")
+        return
+    
+    try:
+        signal = rockblock.signal_quality or 0
+        connected = "Yes" if rockblock.system_time else "No"
+        print(f"RockBLOCK: {signal}/5 bars, Connected: {connected}")
+    except Exception as e:
+        print(f"RockBLOCK: error")
 
 def update_status_led():
     """Update the NeoPixel color to show system status.
     
     GREEN = Everything good + GPS lock
-    BLUE = Waiting for GPS fix
+    BLUE = Waiting for GPS fix  
+    YELLOW = RockBLOCK issues
     RED = System problem
     """
-    # Simple color codes 
     GREEN = (0, 255, 0)
     BLUE = (0, 0, 255)
+    YELLOW = (255, 255, 0)
     RED = (255, 0, 0)
+    
+    # Check RockBLOCK status first
+    if not rockblock_available:
+        pixels.fill(YELLOW)
+        return
     
     # Check GPS status
     if gps_available and gps.has_fix:
-        # We have GPS lock - show green!
         pixels.fill(GREEN)
     elif gps_available and not gps.has_fix:
-        # GPS is working but waiting for fix - show blue
         pixels.fill(BLUE)
     else:
-        # Something's wrong - show red
         pixels.fill(RED)
 
 def update_display(counter):
-    """Update the OLED display with sensor data.
-    
-    This function shows one screen of data on the OLED display.
-    You can modify this function to show different screens!
-    """
+    """Update the OLED display with sensor data."""
     if not oled_available:
         return
     
     try:
-        # define sensor output screens
-        if counter % 3 == 0:
-            # Show screen 1 (temperature)
+        # 5 screens now: temp, altitude, GPS, battery, RockBLOCK
+        if counter % 5 == 0:
+            # Temperature screen
             oled.clear()
             if bmp_available:
                 temp_f = bmp_sensor.get_temperature()
@@ -160,25 +217,53 @@ def update_display(counter):
             else:
                 oled.add_text("offline")
             oled.add_text("Temperature")
-        elif counter % 3 == 1:
-            # Show screen 2 (pressure)
+            
+        elif counter % 5 == 1:
+            # Altitude screen
             oled.clear()
             if bmp_available:
                 oled.add_text(f"{bmp_sensor.get_altitude()} meters")
-
             else:
                 oled.add_text("offline")
             oled.add_text("Altitude")
-        elif counter % 3 == 2:
-            # Show screen 3 (GPS)
+            
+        elif counter % 5 == 2:
+            # GPS screen
             oled.clear()
-            if gps_available:
-                oled.add_text(f"{gps.get_location()}")
-                oled.add_text(f"Satellites: {gps.get_satellites()}")
+            if gps_available and gps.has_fix:
+                location = gps.get_location()
+                if location:
+                    lat, lon = location
+                    oled.add_text(f"{lat:.4f},{lon:.4f}")
+                oled.add_text(f"Sats: {gps.get_satellites()}")
             else:
-                oled.add_text("offline")
-
-            oled.add_text("GPS Data") 
+                oled.add_text("GPS offline")
+                
+        elif counter % 5 == 3:
+            # Battery screen
+            oled.clear()
+            voltage = get_battery_voltage()
+            if voltage:
+                oled.add_text(f"{voltage:.2f} V")
+            else:
+                oled.add_text("No battery")
+            oled.add_text("Battery")
+                
+        elif counter % 5 == 4:
+            # RockBLOCK screen - NOW SHOWS STATUS
+            oled.clear()
+            if rockblock_available:
+                try:
+                    signal = rockblock.signal_quality or 0
+                    connected = "Yes" if rockblock.system_time else "No"
+                    oled.add_text(f"Signal: {signal}/5")
+                    oled.add_text(f"Connected: {connected}")
+                except:
+                    oled.add_text("RockBLOCK")
+                    oled.add_text("ERROR")
+            else:
+                oled.add_text("RockBLOCK")
+                oled.add_text("OFFLINE")
         
     except Exception as e:
         print(f"Error updating display: {e}")
@@ -186,15 +271,19 @@ def update_display(counter):
 print("Starting main loop...")
 
 # Counter for display
-display_counter = 0
+display_counter = 1
 
 while True:
-    print("\n" + "=" * 40)  # Separator line
-    print("SENSOR READINGS:")
-    print_cpu_temp()
-    print_bmp_sensor()
-    print("\nGPS DATA:")
-    print_gps_data()
+    if display_counter % 5 == 0:
+        print("\n" + "=" * 40)
+        print("SENSOR READINGS:")
+        print_cpu_temp()
+        print_bmp_sensor()
+        print_battery_info()
+        print("\nGPS DATA:")
+        print_gps_data()
+        print("\nROCKBLOCK STATUS:")
+        print_rockblock_info()
     
     # Update the neopixel to show our sensor health at a glance 
     update_status_led()

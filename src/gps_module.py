@@ -119,7 +119,23 @@ class GPSModule:
         if not self.gps.has_fix or self.gps.altitude_m is None:
             return None
         return self.gps.altitude_m
-    
+
+    def get_timestamp(self):
+        """Return the current timestamp from GPS"""
+        if not self.gps.has_fix or self.gps.timestamp_utc is None:
+            return None
+        if self.gps.timestamp_utc:
+            return(
+                "{}/{}/{} {:02}:{:02}:{:02}".format(
+                    self.gps.timestamp_utc.tm_mon,
+                    self.gps.timestamp_utc.tm_mday,
+                    self.gps.timestamp_utc.tm_year,
+                    self.gps.timestamp_utc.tm_hour,
+                    self.gps.timestamp_utc.tm_min,
+                    self.gps.timestamp_utc.tm_sec,
+                )
+            )
+         
     def get_speed(self, unit='kmh'):
         """Get the current speed in requested units.
         
@@ -137,12 +153,6 @@ class GPSModule:
         elif unit.lower() == 'knots' and self.gps.speed_knots is not None:
             return self.gps.speed_knots
         return None
-    
-    def get_timestamp(self):
-        """Get the current timestamp as a struct_time object."""
-        if not self.gps.has_fix or self.gps.timestamp_utc is None:
-            return None
-        return self.gps.timestamp_utc
     
     def get_satellites(self):
         """Get the number of satellites being tracked."""
