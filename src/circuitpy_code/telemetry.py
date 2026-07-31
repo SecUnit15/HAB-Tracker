@@ -5,14 +5,39 @@ Python on a laptop. Keep it that way: no `board`, `busio` or `time` imports.
 """
 
 
-def build_message(lat, lon, altitude, satellites, battery, temperature):
+PAYLOAD_VERSION = "H2"
+
+
+def format_field(value, style="%d"):
+    """Format one reading, or '?' if we do not have it."""
+    if value is None:
+        return "?"
+    return style % value
+
+
+def build_message(boot_id, sequence, lat, lon, altitude, satellites,
+                  battery, temperature, fix_age_s):
     """Build the pipe-separated message we send over Iridium.
 
-    Format: lat|lon|altitude_m|satellites|battery_v|temperature_f
+    H2|boot|seq|lat|lon|altitude_m|satellites|battery_v|temperature_f|fix_age_s
+
+    boot counts restarts and seq counts messages, so the ground can tell a
+    resent message (the same seq arriving twice) apart from a new reading that
+    happens to look identical. A reading we do not have is sent as "?" rather
+    than a fake 0, because 0 is a real value for several of these fields.
     """
-    return "%.4f|%.4f|%d|%s|%.1f|%.0f" % (
-        lat, lon, altitude or 0, satellites, battery or 0, temperature or 0
-    )
+    return "|".join([
+        PAYLOAD_VERSION,
+        format_field(boot_id),
+        format_field(sequence),
+        format_field(lat, "%.4f"),
+        format_field(lon, "%.4f"),
+        format_field(altitude),
+        format_field(satellites),
+        format_field(battery, "%.2f"),
+        format_field(temperature),
+        format_field(fix_age_s),
+    ])
 
 
 def parse_sbdix(line):

@@ -25,7 +25,13 @@ class HABTracker:
         self.satellite_success_count = 0
         self.satellite_fail_count = 0
         self.next_satellite_time = 0  # Send immediately on startup
-        
+
+        # boot_id survives a restart, sequence counts messages this run.
+        self.boot_id = self._read_boot_id()
+        self.sequence = 0
+        self.last_fix_stamp = None  # GPS clock reading of our newest fix
+        self.last_fix_time = None   # our clock when that fix arrived
+
         # Initialize hardware
         self.led = digitalio.DigitalInOut(board.LED)
         self.led.direction = digitalio.Direction.OUTPUT
@@ -34,6 +40,17 @@ class HABTracker:
         # Initialize all components
         self._initialize_hardware()
     
+    def _read_boot_id(self):
+        """Count restarts in non-volatile memory. If this changes mid-flight,
+        the payload rebooted."""
+        try:
+            nvm = microcontroller.nvm
+            boot_id = (nvm[0] + 1) % 256
+            nvm[0] = boot_id
+            return boot_id
+        except Exception:
+            return 0
+
     def _show_boot_status(self, message, line2=""):
         """Display boot status on OLED and serial"""
         print(message)
@@ -122,9 +139,9 @@ class HABTracker:
         data = {
             'lat': None, 'lon': None, 'altitude': None,
             'satellites': 0, 'battery': None, 'temperature': None,
-            'has_gps_fix': False
+            'has_gps_fix': False, 'fix_age': None
         }
-        
+
         # GPS data
         if self.gps:
             self.gps.update()
@@ -134,7 +151,22 @@ class HABTracker:
                 location = self.gps.get_location()
                 if location:
                     data['lat'], data['lon'] = location
-        
+
+                # Only count this as fresh if the GPS clock actually moved on.
+                # has_fix stays True from the last sentence we managed to
+                # parse, so trusting it alone would report an age of 0 forever
+                # while the position quietly went stale.
+                stamp = self.gps.get_timestamp()
+                if stamp is not None and stamp != self.last_fix_stamp:
+                    self.last_fix_stamp = stamp
+                    self.last_fix_time = time.time()
+
+        # How old our position is, so the ground never has to guess whether a
+        # repeated position is current or left over.
+        if self.last_fix_time is not None:
+            data['fix_age'] = int(time.time() - self.last_fix_time)
+
+
         # Altitude and temperature
         if self.bmp_sensor:
             data['altitude'] = self.bmp_sensor.get_altitude()
@@ -171,12 +203,20 @@ class HABTracker:
         
         # Send the message
         print(f"📡 Sending: {data['lat']:.4f},{data['lon']:.4f} alt:{data['altitude']}m")
+        # One sequence number per message we build, so a message that reaches
+        # the ground twice arrives with the same seq and is obvious.
+        self.sequence += 1
         success, _ = self.rockblock.send_tracking_data_with_retry(
-            data['lat'], data['lon'], data['altitude'], 
-            data['satellites'], data['battery'], data['temperature'], 
+            self.boot_id, self.sequence,
+            data['lat'], data['lon'], data['altitude'],
+            data['satellites'], data['battery'], data['temperature'],
+            data['fix_age'],
             max_attempts=2
         )
-        
+
+        if self.rockblock.last_session:
+            print(f"   MOMSN: {self.rockblock.last_session['momsn']}")
+
         return success
     
     def update_led(self, data):

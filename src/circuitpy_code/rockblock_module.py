@@ -121,11 +121,14 @@ class SimpleRockBLOCK:
                 print(f"Signal check error: {e}")
             return 0
     
-    def send_tracking_data_with_retry(self, lat, lon, altitude, satellites, battery, temperature, max_attempts=3):
+    def send_tracking_data_with_retry(self, boot_id, sequence, lat, lon, altitude,
+                                      satellites, battery, temperature,
+                                      fix_age_s, max_attempts=3):
         """Send tracking data with automatic retry"""
-        
+
         message = telemetry.build_message(
-            lat, lon, altitude, satellites, battery, temperature
+            boot_id, sequence, lat, lon, altitude, satellites,
+            battery, temperature, fix_age_s
         )
         
         if self.debug:
