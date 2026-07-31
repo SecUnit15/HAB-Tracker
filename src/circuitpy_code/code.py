@@ -17,6 +17,7 @@ SATELLITE_ENABLED = True
 SATELLITE_INTERVAL_SECONDS = 300  # 5 minutes
 REQUIRE_GPS_FOR_SATELLITE = True
 RETRY_FAILED_AFTER_SECONDS = 30
+MODEM_RETRY_SECONDS = 60  # How often to retry a modem that failed to start
 # ===========================================
 
 class HABTracker:
@@ -105,26 +106,34 @@ class HABTracker:
             self.gps = None
             self._show_boot_status("GPS: FAIL")
         
-        # Satellite Modem (RockBLOCK) - Required!
-        try:
-            time.sleep(3)
-            self.rockblock = SimpleRockBLOCK(debug=True)
-            
-            if not self.rockblock.model:
-                self._show_boot_status("RockBLOCK: FAIL", "Check power!")
-                while True:
-                    time.sleep(10)
-            
-            imei_short = self.rockblock.serial_number[-6:] if self.rockblock.serial_number else 'Unknown'
-            self._show_boot_status("RockBLOCK: OK", f"IMEI: {imei_short}")
-        except Exception as e:
-            self._show_boot_status("RockBLOCK: FAIL", "Check wiring!")
-            while True:
-                time.sleep(10)
-        
+        # Satellite Modem (RockBLOCK)
+        self.rockblock = None
+        self.next_modem_retry = 0
+        time.sleep(3)
+        self._try_init_modem()
+
         self._show_boot_status("Ready!")
         time.sleep(1)
     
+    def _try_init_modem(self):
+        """Try to start the satellite modem. Safe to call again later."""
+        try:
+            radio = SimpleRockBLOCK(debug=True)
+
+            if not radio.model:
+                self._show_boot_status("RockBLOCK: FAIL", "Will retry...")
+                return False
+
+            self.rockblock = radio
+            imei_short = radio.serial_number[-6:] if radio.serial_number else 'Unknown'
+            self._show_boot_status("RockBLOCK: OK", f"IMEI: {imei_short}")
+            return True
+
+        except Exception as e:
+            print("Modem init failed:", e)
+            self._show_boot_status("RockBLOCK: FAIL", "Will retry...")
+            return False
+
     def get_battery_voltage(self):
         """Read battery voltage"""
         if not self.battery_voltage:
@@ -181,7 +190,12 @@ class HABTracker:
         """Try to send satellite message"""
         if not SATELLITE_ENABLED:
             return False
-            
+
+        # The modem may not have started yet; the main loop keeps retrying it.
+        if not self.rockblock:
+            return False
+
+
         # Check GPS requirement
         if REQUIRE_GPS_FOR_SATELLITE and not data['has_gps_fix']:
             print("📡 Waiting for GPS lock to send...")
@@ -300,6 +314,12 @@ class HABTracker:
                         print(f"GPS: Searching... Sats: {data['satellites']}")
                 last_status_time = time.time()
             
+            # If the modem never started, keep trying in the background rather
+            # than giving up on the flight.
+            if self.rockblock is None and time.time() >= self.next_modem_retry:
+                self.next_modem_retry = time.time() + MODEM_RETRY_SECONDS
+                self._try_init_modem()
+
             # Check if time to send satellite message
             if SATELLITE_ENABLED and time.time() >= self.next_satellite_time:
                 print(f"\n📡 Satellite transmission...")
