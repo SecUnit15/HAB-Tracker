@@ -151,24 +151,29 @@ class HABTracker:
             'has_gps_fix': False, 'fix_age': None
         }
 
-        # GPS data
+        # GPS data. Wrapped because these sensors share one I2C bus, and a
+        # single bad read used to throw straight out of the main loop and end
+        # the flight program. A missing reading is survivable; a crash is not.
         if self.gps:
-            self.gps.update()
-            data['has_gps_fix'] = self.gps.has_fix
-            data['satellites'] = self.gps.get_satellites()
-            if self.gps.has_fix:
-                location = self.gps.get_location()
-                if location:
-                    data['lat'], data['lon'] = location
+            try:
+                self.gps.update()
+                data['has_gps_fix'] = self.gps.has_fix
+                data['satellites'] = self.gps.get_satellites()
+                if self.gps.has_fix:
+                    location = self.gps.get_location()
+                    if location:
+                        data['lat'], data['lon'] = location
 
-                # Only count this as fresh if the GPS clock actually moved on.
-                # has_fix stays True from the last sentence we managed to
-                # parse, so trusting it alone would report an age of 0 forever
-                # while the position quietly went stale.
-                stamp = self.gps.get_timestamp()
-                if stamp is not None and stamp != self.last_fix_stamp:
-                    self.last_fix_stamp = stamp
-                    self.last_fix_time = time.time()
+                    # Only count this as fresh if the GPS clock actually moved
+                    # on. has_fix stays True from the last sentence we managed
+                    # to parse, so trusting it alone would report an age of 0
+                    # forever while the position quietly went stale.
+                    stamp = self.gps.get_timestamp()
+                    if stamp is not None and stamp != self.last_fix_stamp:
+                        self.last_fix_stamp = stamp
+                        self.last_fix_time = time.time()
+            except Exception as e:
+                print("GPS read failed:", e)
 
         # How old our position is, so the ground never has to guess whether a
         # repeated position is current or left over.
@@ -176,10 +181,13 @@ class HABTracker:
             data['fix_age'] = int(time.time() - self.last_fix_time)
 
 
-        # Altitude and temperature
+        # Altitude and temperature (same reason as above)
         if self.bmp_sensor:
-            data['altitude'] = self.bmp_sensor.get_altitude()
-            data['temperature'] = self.bmp_sensor.get_temperature()
+            try:
+                data['altitude'] = self.bmp_sensor.get_altitude()
+                data['temperature'] = self.bmp_sensor.get_temperature()
+            except Exception as e:
+                print("BMP280 read failed:", e)
         
         # Battery
         data['battery'] = self.get_battery_voltage()
