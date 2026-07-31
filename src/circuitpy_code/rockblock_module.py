@@ -126,8 +126,10 @@ class SimpleRockBLOCK:
             status_code = self._send_message()
             
             if status_code is not None:
-                # Success codes: 0-5 = sent, 6-8 = queued
-                if status_code <= 8:
+                # Iridium says 0-4 = delivered, 5-8 = session FAILED.
+                # We used to accept <= 8, so a failed send looked like a success
+                # and we skipped the retry - silently losing that reading.
+                if status_code <= 4:
                     if self.debug:
                         print("✅ Message sent successfully!")
                     return True, status_code
