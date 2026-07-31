@@ -6,9 +6,10 @@ import telemetry
 class SimpleRockBLOCK:
     """Simplified RockBLOCK satellite modem interface for HAB tracking"""
     
-    def __init__(self, debug=False):
+    def __init__(self, debug=False, uart=None):
         self.debug = debug
-        self.uart = busio.UART(board.D1, board.D0, baudrate=19200, timeout=1)
+        # uart can be supplied so tests can drive the modem without hardware.
+        self.uart = uart or busio.UART(board.D1, board.D0, baudrate=19200, timeout=1)
         self.model = None
         self.serial_number = None
         # Details of the most recent satellite session, including its MOMSN.
