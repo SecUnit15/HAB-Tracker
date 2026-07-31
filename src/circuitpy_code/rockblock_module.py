@@ -141,6 +141,9 @@ class SimpleRockBLOCK:
                 # We used to accept <= 8, so a failed send looked like a success
                 # and we skipped the retry - silently losing that reading.
                 if status_code <= 4:
+                    # Empty the outbox now it is delivered, so a stray later
+                    # session has nothing to send a second time.
+                    self._send_at_command("+SBDD0")
                     if self.debug:
                         print("✅ Message sent successfully!")
                     return True, status_code
@@ -181,22 +184,52 @@ class SimpleRockBLOCK:
         return False, None
     
     def _set_message(self, message):
-        """Set message in modem buffer"""
+        """Load one message into the modem's outbox, ready to send.
+
+        The rule this enforces: never start a session unless this returned
+        True. The modem has no command to read the outbox back, so we empty it
+        first and then confirm something is in it. A failed write therefore
+        leaves the outbox empty instead of leaving the previous message there.
+        """
         try:
-            command = f'+SBDWT="{message}"'
-            response = self._send_at_command(command)
-            
-            if "OK" in str(response):
-                return True
-            else:
+            # Empty the outbox first. If the write below fails, there is then
+            # nothing stale left for a session to pick up and send again.
+            if "OK" not in str(self._send_at_command("+SBDD0")):
+                if self.debug:
+                    print("❌ Could not clear the outbox")
+                return False
+
+            # AT+SBDWT wants bare text. The quotes we used to wrap around it
+            # were stored as part of the message and had to be stripped later.
+            if "OK" not in str(self._send_at_command(f"+SBDWT={message}")):
                 if self.debug:
                     print("❌ Failed to set message")
                 return False
-                
+
+            # +SBDS cannot show us the text, but it does say whether a message
+            # is now waiting - which is enough to know the write landed.
+            if not self._outbox_has_message():
+                if self.debug:
+                    print("❌ Outbox still empty after write - not sending")
+                return False
+
+            return True
+
         except Exception as e:
             if self.debug:
                 print(f"❌ Set message error: {e}")
             return False
+
+    def _outbox_has_message(self):
+        """True if +SBDS reports a message waiting in the outbox."""
+        # +SBDS: <outbox flag>,<MOMSN>,<inbox flag>,<MTMSN>
+        for line in self._send_at_command("+SBDS"):
+            if "+SBDS:" in line:
+                try:
+                    return int(line.split(":")[1].split(",")[0]) == 1
+                except (ValueError, IndexError):
+                    return False
+        return False
     
     def _send_message(self):
         """Send message via satellite"""
