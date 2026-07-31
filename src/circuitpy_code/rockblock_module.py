@@ -142,10 +142,13 @@ class SimpleRockBLOCK:
                     if attempt < max_attempts - 1:
                         time.sleep(30)
                     
-                elif status_code in [13, 14, 15]:
-                    # Account/credit error - stop trying
+                elif status_code == 15:
+                    # 15 = access denied. Retrying cannot fix this one.
+                    # 13 (session did not complete) and 14 (bad segment size)
+                    # used to land here too, but those are temporary - they now
+                    # fall through to the normal retry below.
                     if self.debug:
-                        print(f"❌ Account/credit error ({status_code})")
+                        print(f"❌ Access denied ({status_code})")
                     return False, status_code
                     
                 else:
