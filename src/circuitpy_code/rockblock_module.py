@@ -10,7 +10,9 @@ class SimpleRockBLOCK:
         self.uart = busio.UART(board.D1, board.D0, baudrate=19200, timeout=1)
         self.model = None
         self.serial_number = None
-        
+        # Details of the most recent satellite session, including its MOMSN.
+        self.last_session = None
+
         # Initialize modem
         self._initialize()
     
@@ -197,20 +199,32 @@ class SimpleRockBLOCK:
             for line in response:
                 if "+SBDIX:" in line:
                     try:
-                        # Extract status codes
-                        status_part = line.split(":")[1].strip()
-                        status_codes = status_part.split(",")
-                        status_code = int(status_codes[0])
-                        
-                        if self.debug:
-                            print(f"Status code: {status_code}")
-                        
-                        return status_code
-                        
+                        fields = [int(v) for v in line.split(":")[1].split(",")]
                     except (ValueError, IndexError) as e:
                         if self.debug:
                             print(f"Parse error: {e}")
                         continue
+
+                    if len(fields) != 6:
+                        continue
+
+                    # +SBDIX answers with six numbers and we only ever read the
+                    # first. The second is the MOMSN - the ID Iridium gave this
+                    # message - which is how the ground can tell a resend apart
+                    # from a genuinely new reading.
+                    self.last_session = {
+                        'mo_status': fields[0],
+                        'momsn': fields[1],
+                        'mt_status': fields[2],
+                        'mtmsn': fields[3],
+                        'mt_length': fields[4],
+                        'mt_queued': fields[5],
+                    }
+
+                    if self.debug:
+                        print(f"Status code: {fields[0]}  MOMSN: {fields[1]}")
+
+                    return fields[0]
             
             # No valid response found
             return None
