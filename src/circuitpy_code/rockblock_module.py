@@ -88,7 +88,11 @@ class SimpleRockBLOCK:
             return [f"ERROR: {e}"]
     
     def check_signal(self):
-        """Get Iridium signal strength (0-5 bars)"""
+        """Get Iridium signal strength (0-5 bars). Bench diagnostics only.
+
+        Do not call this before a send: it costs about 20 seconds, and the sky
+        can change in that time. Start the session instead and let it fail.
+        """
         try:
             response = self._send_at_command("+CSQ", timeout=5)
             

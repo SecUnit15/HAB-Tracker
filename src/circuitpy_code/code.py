@@ -16,7 +16,6 @@ from rockblock_module import SimpleRockBLOCK
 SATELLITE_ENABLED = True
 SATELLITE_INTERVAL_SECONDS = 300  # 5 minutes
 REQUIRE_GPS_FOR_SATELLITE = True
-MIN_SIGNAL_STRENGTH = 0  # 0 = disabled, 1-5 = minimum required
 RETRY_FAILED_AFTER_SECONDS = 30
 # ===========================================
 
@@ -158,14 +157,11 @@ class HABTracker:
             self.next_satellite_time = time.time() + 30
             return False
         
-        # Check signal strength
-        signal = self.rockblock.check_signal()
-        print(f"📡 Signal: {signal}/5")
-        
-        if signal < MIN_SIGNAL_STRENGTH:
-            print(f"❌ Signal too weak - need {MIN_SIGNAL_STRENGTH}/5")
-            return False
-        
+        # No signal check here on purpose. Ground Control advise against it:
+        # AT+CSQ takes about 20 seconds, and an Iridium satellite that was well
+        # placed when we asked can be behind a hill by the time we get the
+        # answer. Just try the send - we are only charged for ones that work.
+
         # Show transmitting message
         if self.oled:
             self.oled.clear()
