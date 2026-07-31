@@ -12,6 +12,7 @@ class SimpleRockBLOCK:
         self.serial_number = None
         # Details of the most recent satellite session, including its MOMSN.
         self.last_session = None
+        self.flow_control_off = False
 
         # Initialize modem
         self._initialize()
@@ -26,7 +27,15 @@ class SimpleRockBLOCK:
             if "OK" in str(response):
                 if self.debug:
                     print("✅ Modem responding")
-            
+
+            # We wire the modem with only TX/RX/GND, so there are no flow
+            # control lines for it to use. AT&K0 turns that off. Without it we
+            # inherit whatever the modem was last set to, which makes dropped
+            # and garbled bytes hard to reproduce on the bench.
+            self.flow_control_off = "OK" in str(self._send_at_command("&K0"))
+            if self.debug and not self.flow_control_off:
+                print("⚠️ AT&K0 was not confirmed")
+
             # Get IMEI (serial number)
             self._get_imei()
             
