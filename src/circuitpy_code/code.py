@@ -15,10 +15,16 @@ from rockblock_module import SimpleRockBLOCK
 # ===========================================
 SATELLITE_ENABLED = True
 SATELLITE_INTERVAL_SECONDS = 300  # 5 minutes
-REQUIRE_GPS_FOR_SATELLITE = True
 RETRY_FAILED_AFTER_SECONDS = 30
 MODEM_RETRY_SECONDS = 60  # How often to retry a modem that failed to start
 # ===========================================
+
+def _show(value, style="%d"):
+    """Format a reading for the screen or log, or '?' if we do not have it."""
+    if value is None:
+        return "?"
+    return style % value
+
 
 class HABTracker:
     def __init__(self):
@@ -204,13 +210,11 @@ class HABTracker:
             return False
 
 
-        # Check GPS requirement
-        if REQUIRE_GPS_FOR_SATELLITE and not data['has_gps_fix']:
-            print("📡 Waiting for GPS lock to send...")
-            # Check again in 30 seconds
-            self.next_satellite_time = time.time() + 30
-            return False
-        
+        # We used to refuse to send without a GPS fix. That meant a GPS problem
+        # also cost us altitude, battery, temperature and modem health - all
+        # the readings that would have told us what was wrong. Always send; the
+        # fix age field says how much to trust the position.
+
         # No signal check here on purpose. Ground Control advise against it:
         # AT+CSQ takes about 20 seconds, and an Iridium satellite that was well
         # placed when we asked can be behind a hill by the time we get the
@@ -220,11 +224,12 @@ class HABTracker:
         if self.oled:
             self.oled.clear()
             self.oled.add_text("TRANSMITTING")
-            self.oled.add_text(f"{data['lat']:.2f},{data['lon']:.2f}")
-            self.oled.add_text(f"{data['altitude'] or 0}m")
-        
+            self.oled.add_text(f"{_show(data['lat'], '%.2f')},{_show(data['lon'], '%.2f')}")
+            self.oled.add_text(f"{_show(data['altitude'])}m")
+
         # Send the message
-        print(f"📡 Sending: {data['lat']:.4f},{data['lon']:.4f} alt:{data['altitude']}m")
+        print(f"📡 Sending: {_show(data['lat'], '%.4f')},{_show(data['lon'], '%.4f')}"
+              f" alt:{_show(data['altitude'])}m")
         # One sequence number per message we build, so a message that reaches
         # the ground twice arrives with the same seq and is obvious.
         self.sequence += 1
@@ -286,12 +291,8 @@ class HABTracker:
                     self.oled.add_text("No battery")
                     
             elif screen == 4:  # Satellite Status
-                if REQUIRE_GPS_FOR_SATELLITE and not data['has_gps_fix']:
-                    self.oled.add_text("Waiting for GPS")
-                    self.oled.add_text(f"Sats: {data['satellites']}")
-                else:
-                    self.oled.add_text(f"Sent: {self.satellite_success_count}")
-                    self.oled.add_text(f"Failed: {self.satellite_fail_count}")
+                self.oled.add_text(f"Sent: {self.satellite_success_count}")
+                self.oled.add_text(f"Failed: {self.satellite_fail_count}")
                     
         except:
             pass
@@ -344,8 +345,8 @@ class HABTracker:
                         self.oled.add_text("SENT OK!")
                         self.oled.add_text(f"Total: {self.satellite_success_count}")
                         time.sleep(3)
-                elif data['has_gps_fix'] or not REQUIRE_GPS_FOR_SATELLITE:
-                    # Only count as failure if we actually tried to send
+                else:
+                    # We always attempt a send now, so any failure is a real one
                     self.satellite_fail_count += 1
                     self.next_satellite_time = time.time() + RETRY_FAILED_AFTER_SECONDS
                     print(f"❌ FAILED! Retry in {RETRY_FAILED_AFTER_SECONDS}s")
