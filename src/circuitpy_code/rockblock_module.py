@@ -1,6 +1,7 @@
 import time
 import busio
 import board
+import telemetry
 
 class SimpleRockBLOCK:
     """Simplified RockBLOCK satellite modem interface for HAB tracking"""
@@ -123,8 +124,9 @@ class SimpleRockBLOCK:
     def send_tracking_data_with_retry(self, lat, lon, altitude, satellites, battery, temperature, max_attempts=3):
         """Send tracking data with automatic retry"""
         
-        # Format message: lat|lon|altitude|satellites|battery|temperature
-        message = f"{lat:.4f}|{lon:.4f}|{altitude or 0}|{satellites}|{battery or 0:.1f}|{temperature or 0:.0f}"
+        message = telemetry.build_message(
+            lat, lon, altitude, satellites, battery, temperature
+        )
         
         if self.debug:
             print(f"📡 Sending: {message}")
@@ -144,7 +146,7 @@ class SimpleRockBLOCK:
                 # Iridium says 0-4 = delivered, 5-8 = session FAILED.
                 # We used to accept <= 8, so a failed send looked like a success
                 # and we skipped the retry - silently losing that reading.
-                if status_code <= 4:
+                if telemetry.is_delivered(status_code):
                     # Empty the outbox now it is delivered, so a stray later
                     # session has nothing to send a second time.
                     self._send_at_command("+SBDD0")
@@ -226,13 +228,10 @@ class SimpleRockBLOCK:
 
     def _outbox_has_message(self):
         """True if +SBDS reports a message waiting in the outbox."""
-        # +SBDS: <outbox flag>,<MOMSN>,<inbox flag>,<MTMSN>
         for line in self._send_at_command("+SBDS"):
-            if "+SBDS:" in line:
-                try:
-                    return int(line.split(":")[1].split(",")[0]) == 1
-                except (ValueError, IndexError):
-                    return False
+            waiting = telemetry.outbox_has_message(line)
+            if waiting is not None:
+                return waiting
         return False
     
     def _send_message(self):
@@ -243,34 +242,19 @@ class SimpleRockBLOCK:
             
             # Parse response
             for line in response:
-                if "+SBDIX:" in line:
-                    try:
-                        fields = [int(v) for v in line.split(":")[1].split(",")]
-                    except (ValueError, IndexError) as e:
-                        if self.debug:
-                            print(f"Parse error: {e}")
-                        continue
+                session = telemetry.parse_sbdix(line)
+                if session is None:
+                    continue
 
-                    if len(fields) != 6:
-                        continue
+                # The MOMSN in here is the ID Iridium gave this message, which
+                # is how the ground can tell a resend from a new reading.
+                self.last_session = session
 
-                    # +SBDIX answers with six numbers and we only ever read the
-                    # first. The second is the MOMSN - the ID Iridium gave this
-                    # message - which is how the ground can tell a resend apart
-                    # from a genuinely new reading.
-                    self.last_session = {
-                        'mo_status': fields[0],
-                        'momsn': fields[1],
-                        'mt_status': fields[2],
-                        'mtmsn': fields[3],
-                        'mt_length': fields[4],
-                        'mt_queued': fields[5],
-                    }
+                if self.debug:
+                    print(f"Status code: {session['mo_status']}"
+                          f"  MOMSN: {session['momsn']}")
 
-                    if self.debug:
-                        print(f"Status code: {fields[0]}  MOMSN: {fields[1]}")
-
-                    return fields[0]
+                return session['mo_status']
             
             # No valid response found
             return None
