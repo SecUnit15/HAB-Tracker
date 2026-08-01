@@ -1,0 +1,8 @@
+# Local planning and scratch workspaces - kept off the remote.
+/plans/
+/docs/2026_air_sampler_payload/
+/tools/payload-workbench/
+
+# Python bytecode
+__pycache__/
+*.pyc
