@@ -68,29 +68,46 @@ def download_messages(bucket_name, imei_filter=None, limit=10):
         print("  gcloud auth application-default login")
         return []
 
+def _field(text, convert):
+    """Read one field, or None if the payload sent '?' for it."""
+    if text == '?':
+        return None
+    return convert(text)
+
+
 def parse_tracking_message(message):
     """
     Parse the pipe-delimited tracking message
-    Format: lat|lon|altitude|satellites|battery|temp
+    Format: H2|boot|seq|lat|lon|altitude|satellites|battery|temp|fix_age
     """
     try:
         # Remove any surrounding quotes that might be present
         clean_message = message.strip().strip('"\'')
-        
+
         parts = clean_message.split('|')
-        if len(parts) == 6:
+        if parts[0] == 'H2' and len(parts) == 10:
             return {
-                'latitude': float(parts[0]),
-                'longitude': float(parts[1]),
-                'altitude': int(parts[2]),
-                'satellites': int(parts[3]),
-                'battery': float(parts[4]),
-                'temperature': int(parts[5])
+                'boot_id': _field(parts[1], int),
+                'sequence': _field(parts[2], int),
+                'latitude': _field(parts[3], float),
+                'longitude': _field(parts[4], float),
+                'altitude': _field(parts[5], int),
+                'satellites': _field(parts[6], int),
+                'battery': _field(parts[7], float),
+                'temperature': _field(parts[8], int),
+                'fix_age': _field(parts[9], int),
             }
         else:
             return {'raw_message': clean_message, 'parsed': False, 'parts_found': len(parts)}
     except Exception as e:
         return {'raw_message': message, 'error': str(e)}
+
+def _show(value, style="%d"):
+    """Format a reading for display, or '?' if the payload did not have it."""
+    if value is None:
+        return "?"
+    return style % value
+
 
 def display_messages(messages):
     """Display messages in a nice format"""
@@ -115,11 +132,15 @@ def display_messages(messages):
         print(f"   Raw Message: {raw_message}")
         
         if 'latitude' in parsed:
-            print(f"   📍 Location: {parsed['latitude']:.4f}, {parsed['longitude']:.4f}")
-            print(f"   🏔️  Altitude: {parsed['altitude']} meters")
-            print(f"   🛰️  Satellites: {parsed['satellites']}")
-            print(f"   🔋 Battery: {parsed['battery']:.1f}V")
-            print(f"   🌡️  Temperature: {parsed['temperature']}°F")
+            print(f"   🔢 Boot: {_show(parsed['boot_id'])}"
+                  f"  Seq: {_show(parsed['sequence'])}"
+                  f"  Fix age: {_show(parsed['fix_age'])}s")
+            print(f"   📍 Location: {_show(parsed['latitude'], '%.4f')},"
+                  f" {_show(parsed['longitude'], '%.4f')}")
+            print(f"   🏔️  Altitude: {_show(parsed['altitude'])} meters")
+            print(f"   🛰️  Satellites: {_show(parsed['satellites'])}")
+            print(f"   🔋 Battery: {_show(parsed['battery'], '%.2f')}V")
+            print(f"   🌡️  Temperature: {_show(parsed['temperature'])}°F")
         elif 'error' in parsed:
             print(f"   ⚠️  Parse Error: {parsed['error']}")
         else:

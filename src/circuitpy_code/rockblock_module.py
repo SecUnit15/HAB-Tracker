@@ -1,16 +1,21 @@
 import time
 import busio
 import board
+import telemetry
 
 class SimpleRockBLOCK:
     """Simplified RockBLOCK satellite modem interface for HAB tracking"""
     
-    def __init__(self, debug=False):
+    def __init__(self, debug=False, uart=None):
         self.debug = debug
-        self.uart = busio.UART(board.D1, board.D0, baudrate=19200, timeout=1)
+        # uart can be supplied so tests can drive the modem without hardware.
+        self.uart = uart or busio.UART(board.D1, board.D0, baudrate=19200, timeout=1)
         self.model = None
         self.serial_number = None
-        
+        # Details of the most recent satellite session, including its MOMSN.
+        self.last_session = None
+        self.flow_control_off = False
+
         # Initialize modem
         self._initialize()
     
@@ -24,7 +29,15 @@ class SimpleRockBLOCK:
             if "OK" in str(response):
                 if self.debug:
                     print("✅ Modem responding")
-            
+
+            # We wire the modem with only TX/RX/GND, so there are no flow
+            # control lines for it to use. AT&K0 turns that off. Without it we
+            # inherit whatever the modem was last set to, which makes dropped
+            # and garbled bytes hard to reproduce on the bench.
+            self.flow_control_off = "OK" in str(self._send_at_command("&K0"))
+            if self.debug and not self.flow_control_off:
+                print("⚠️ AT&K0 was not confirmed")
+
             # Get IMEI (serial number)
             self._get_imei()
             
@@ -77,7 +90,11 @@ class SimpleRockBLOCK:
             return [f"ERROR: {e}"]
     
     def check_signal(self):
-        """Get Iridium signal strength (0-5 bars)"""
+        """Get Iridium signal strength (0-5 bars). Bench diagnostics only.
+
+        Do not call this before a send: it costs about 20 seconds, and the sky
+        can change in that time. Start the session instead and let it fail.
+        """
         try:
             response = self._send_at_command("+CSQ", timeout=5)
             
@@ -105,11 +122,15 @@ class SimpleRockBLOCK:
                 print(f"Signal check error: {e}")
             return 0
     
-    def send_tracking_data_with_retry(self, lat, lon, altitude, satellites, battery, temperature, max_attempts=3):
+    def send_tracking_data_with_retry(self, boot_id, sequence, lat, lon, altitude,
+                                      satellites, battery, temperature,
+                                      fix_age_s, max_attempts=3):
         """Send tracking data with automatic retry"""
-        
-        # Format message: lat|lon|altitude|satellites|battery|temperature
-        message = f"{lat:.4f}|{lon:.4f}|{altitude or 0}|{satellites}|{battery or 0:.1f}|{temperature or 0:.0f}"
+
+        message = telemetry.build_message(
+            boot_id, sequence, lat, lon, altitude, satellites,
+            battery, temperature, fix_age_s
+        )
         
         if self.debug:
             print(f"📡 Sending: {message}")
@@ -126,8 +147,13 @@ class SimpleRockBLOCK:
             status_code = self._send_message()
             
             if status_code is not None:
-                # Success codes: 0-5 = sent, 6-8 = queued
-                if status_code <= 8:
+                # Iridium says 0-4 = delivered, 5-8 = session FAILED.
+                # We used to accept <= 8, so a failed send looked like a success
+                # and we skipped the retry - silently losing that reading.
+                if telemetry.is_delivered(status_code):
+                    # Empty the outbox now it is delivered, so a stray later
+                    # session has nothing to send a second time.
+                    self._send_at_command("+SBDD0")
                     if self.debug:
                         print("✅ Message sent successfully!")
                     return True, status_code
@@ -140,10 +166,13 @@ class SimpleRockBLOCK:
                     if attempt < max_attempts - 1:
                         time.sleep(30)
                     
-                elif status_code in [13, 14, 15]:
-                    # Account/credit error - stop trying
+                elif status_code == 15:
+                    # 15 = access denied. Retrying cannot fix this one.
+                    # 13 (session did not complete) and 14 (bad segment size)
+                    # used to land here too, but those are temporary - they now
+                    # fall through to the normal retry below.
                     if self.debug:
-                        print(f"❌ Account/credit error ({status_code})")
+                        print(f"❌ Access denied ({status_code})")
                     return False, status_code
                     
                 else:
@@ -165,22 +194,49 @@ class SimpleRockBLOCK:
         return False, None
     
     def _set_message(self, message):
-        """Set message in modem buffer"""
+        """Load one message into the modem's outbox, ready to send.
+
+        The rule this enforces: never start a session unless this returned
+        True. The modem has no command to read the outbox back, so we empty it
+        first and then confirm something is in it. A failed write therefore
+        leaves the outbox empty instead of leaving the previous message there.
+        """
         try:
-            command = f'+SBDWT="{message}"'
-            response = self._send_at_command(command)
-            
-            if "OK" in str(response):
-                return True
-            else:
+            # Empty the outbox first. If the write below fails, there is then
+            # nothing stale left for a session to pick up and send again.
+            if "OK" not in str(self._send_at_command("+SBDD0")):
+                if self.debug:
+                    print("❌ Could not clear the outbox")
+                return False
+
+            # AT+SBDWT wants bare text. The quotes we used to wrap around it
+            # were stored as part of the message and had to be stripped later.
+            if "OK" not in str(self._send_at_command(f"+SBDWT={message}")):
                 if self.debug:
                     print("❌ Failed to set message")
                 return False
-                
+
+            # +SBDS cannot show us the text, but it does say whether a message
+            # is now waiting - which is enough to know the write landed.
+            if not self._outbox_has_message():
+                if self.debug:
+                    print("❌ Outbox still empty after write - not sending")
+                return False
+
+            return True
+
         except Exception as e:
             if self.debug:
                 print(f"❌ Set message error: {e}")
             return False
+
+    def _outbox_has_message(self):
+        """True if +SBDS reports a message waiting in the outbox."""
+        for line in self._send_at_command("+SBDS"):
+            waiting = telemetry.outbox_has_message(line)
+            if waiting is not None:
+                return waiting
+        return False
     
     def _send_message(self):
         """Send message via satellite"""
@@ -190,22 +246,19 @@ class SimpleRockBLOCK:
             
             # Parse response
             for line in response:
-                if "+SBDIX:" in line:
-                    try:
-                        # Extract status codes
-                        status_part = line.split(":")[1].strip()
-                        status_codes = status_part.split(",")
-                        status_code = int(status_codes[0])
-                        
-                        if self.debug:
-                            print(f"Status code: {status_code}")
-                        
-                        return status_code
-                        
-                    except (ValueError, IndexError) as e:
-                        if self.debug:
-                            print(f"Parse error: {e}")
-                        continue
+                session = telemetry.parse_sbdix(line)
+                if session is None:
+                    continue
+
+                # The MOMSN in here is the ID Iridium gave this message, which
+                # is how the ground can tell a resend from a new reading.
+                self.last_session = session
+
+                if self.debug:
+                    print(f"Status code: {session['mo_status']}"
+                          f"  MOMSN: {session['momsn']}")
+
+                return session['mo_status']
             
             # No valid response found
             return None

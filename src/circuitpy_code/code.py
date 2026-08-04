@@ -15,10 +15,16 @@ from rockblock_module import SimpleRockBLOCK
 # ===========================================
 SATELLITE_ENABLED = True
 SATELLITE_INTERVAL_SECONDS = 300  # 5 minutes
-REQUIRE_GPS_FOR_SATELLITE = True
-MIN_SIGNAL_STRENGTH = 0  # 0 = disabled, 1-5 = minimum required
 RETRY_FAILED_AFTER_SECONDS = 30
+MODEM_RETRY_SECONDS = 60  # How often to retry a modem that failed to start
 # ===========================================
+
+def _show(value, style="%d"):
+    """Format a reading for the screen or log, or '?' if we do not have it."""
+    if value is None:
+        return "?"
+    return style % value
+
 
 class HABTracker:
     def __init__(self):
@@ -26,7 +32,13 @@ class HABTracker:
         self.satellite_success_count = 0
         self.satellite_fail_count = 0
         self.next_satellite_time = 0  # Send immediately on startup
-        
+
+        # boot_id survives a restart, sequence counts messages this run.
+        self.boot_id = self._read_boot_id()
+        self.sequence = 0
+        self.last_fix_stamp = None  # GPS clock reading of our newest fix
+        self.last_fix_time = None   # our clock when that fix arrived
+
         # Initialize hardware
         self.led = digitalio.DigitalInOut(board.LED)
         self.led.direction = digitalio.Direction.OUTPUT
@@ -35,6 +47,17 @@ class HABTracker:
         # Initialize all components
         self._initialize_hardware()
     
+    def _read_boot_id(self):
+        """Count restarts in non-volatile memory. If this changes mid-flight,
+        the payload rebooted."""
+        try:
+            nvm = microcontroller.nvm
+            boot_id = (nvm[0] + 1) % 256
+            nvm[0] = boot_id
+            return boot_id
+        except Exception:
+            return 0
+
     def _show_boot_status(self, message, line2=""):
         """Display boot status on OLED and serial"""
         print(message)
@@ -89,26 +112,34 @@ class HABTracker:
             self.gps = None
             self._show_boot_status("GPS: FAIL")
         
-        # Satellite Modem (RockBLOCK) - Required!
-        try:
-            time.sleep(3)
-            self.rockblock = SimpleRockBLOCK(debug=True)
-            
-            if not self.rockblock.model:
-                self._show_boot_status("RockBLOCK: FAIL", "Check power!")
-                while True:
-                    time.sleep(10)
-            
-            imei_short = self.rockblock.serial_number[-6:] if self.rockblock.serial_number else 'Unknown'
-            self._show_boot_status("RockBLOCK: OK", f"IMEI: {imei_short}")
-        except Exception as e:
-            self._show_boot_status("RockBLOCK: FAIL", "Check wiring!")
-            while True:
-                time.sleep(10)
-        
+        # Satellite Modem (RockBLOCK)
+        self.rockblock = None
+        self.next_modem_retry = 0
+        time.sleep(3)
+        self._try_init_modem()
+
         self._show_boot_status("Ready!")
         time.sleep(1)
     
+    def _try_init_modem(self):
+        """Try to start the satellite modem. Safe to call again later."""
+        try:
+            radio = SimpleRockBLOCK(debug=True)
+
+            if not radio.model:
+                self._show_boot_status("RockBLOCK: FAIL", "Will retry...")
+                return False
+
+            self.rockblock = radio
+            imei_short = radio.serial_number[-6:] if radio.serial_number else 'Unknown'
+            self._show_boot_status("RockBLOCK: OK", f"IMEI: {imei_short}")
+            return True
+
+        except Exception as e:
+            print("Modem init failed:", e)
+            self._show_boot_status("RockBLOCK: FAIL", "Will retry...")
+            return False
+
     def get_battery_voltage(self):
         """Read battery voltage"""
         if not self.battery_voltage:
@@ -123,23 +154,46 @@ class HABTracker:
         data = {
             'lat': None, 'lon': None, 'altitude': None,
             'satellites': 0, 'battery': None, 'temperature': None,
-            'has_gps_fix': False
+            'has_gps_fix': False, 'fix_age': None
         }
-        
-        # GPS data
+
+        # GPS data. Wrapped because these sensors share one I2C bus, and a
+        # single bad read used to throw straight out of the main loop and end
+        # the flight program. A missing reading is survivable; a crash is not.
         if self.gps:
-            self.gps.update()
-            data['has_gps_fix'] = self.gps.has_fix
-            data['satellites'] = self.gps.get_satellites()
-            if self.gps.has_fix:
-                location = self.gps.get_location()
-                if location:
-                    data['lat'], data['lon'] = location
-        
-        # Altitude and temperature
+            try:
+                self.gps.update()
+                data['has_gps_fix'] = self.gps.has_fix
+                data['satellites'] = self.gps.get_satellites()
+                if self.gps.has_fix:
+                    location = self.gps.get_location()
+                    if location:
+                        data['lat'], data['lon'] = location
+
+                    # Only count this as fresh if the GPS clock actually moved
+                    # on. has_fix stays True from the last sentence we managed
+                    # to parse, so trusting it alone would report an age of 0
+                    # forever while the position quietly went stale.
+                    stamp = self.gps.get_timestamp()
+                    if stamp is not None and stamp != self.last_fix_stamp:
+                        self.last_fix_stamp = stamp
+                        self.last_fix_time = time.time()
+            except Exception as e:
+                print("GPS read failed:", e)
+
+        # How old our position is, so the ground never has to guess whether a
+        # repeated position is current or left over.
+        if self.last_fix_time is not None:
+            data['fix_age'] = int(time.time() - self.last_fix_time)
+
+
+        # Altitude and temperature (same reason as above)
         if self.bmp_sensor:
-            data['altitude'] = self.bmp_sensor.get_altitude()
-            data['temperature'] = self.bmp_sensor.get_temperature()
+            try:
+                data['altitude'] = self.bmp_sensor.get_altitude()
+                data['temperature'] = self.bmp_sensor.get_temperature()
+            except Exception as e:
+                print("BMP280 read failed:", e)
         
         # Battery
         data['battery'] = self.get_battery_voltage()
@@ -150,37 +204,46 @@ class HABTracker:
         """Try to send satellite message"""
         if not SATELLITE_ENABLED:
             return False
-            
-        # Check GPS requirement
-        if REQUIRE_GPS_FOR_SATELLITE and not data['has_gps_fix']:
-            print("📡 Waiting for GPS lock to send...")
-            # Check again in 30 seconds
-            self.next_satellite_time = time.time() + 30
+
+        # The modem may not have started yet; the main loop keeps retrying it.
+        if not self.rockblock:
             return False
-        
-        # Check signal strength
-        signal = self.rockblock.check_signal()
-        print(f"📡 Signal: {signal}/5")
-        
-        if signal < MIN_SIGNAL_STRENGTH:
-            print(f"❌ Signal too weak - need {MIN_SIGNAL_STRENGTH}/5")
-            return False
-        
+
+
+        # We used to refuse to send without a GPS fix. That meant a GPS problem
+        # also cost us altitude, battery, temperature and modem health - all
+        # the readings that would have told us what was wrong. Always send; the
+        # fix age field says how much to trust the position.
+
+        # No signal check here on purpose. Ground Control advise against it:
+        # AT+CSQ takes about 20 seconds, and an Iridium satellite that was well
+        # placed when we asked can be behind a hill by the time we get the
+        # answer. Just try the send - we are only charged for ones that work.
+
         # Show transmitting message
         if self.oled:
             self.oled.clear()
             self.oled.add_text("TRANSMITTING")
-            self.oled.add_text(f"{data['lat']:.2f},{data['lon']:.2f}")
-            self.oled.add_text(f"{data['altitude'] or 0}m")
-        
+            self.oled.add_text(f"{_show(data['lat'], '%.2f')},{_show(data['lon'], '%.2f')}")
+            self.oled.add_text(f"{_show(data['altitude'])}m")
+
         # Send the message
-        print(f"📡 Sending: {data['lat']:.4f},{data['lon']:.4f} alt:{data['altitude']}m")
+        print(f"📡 Sending: {_show(data['lat'], '%.4f')},{_show(data['lon'], '%.4f')}"
+              f" alt:{_show(data['altitude'])}m")
+        # One sequence number per message we build, so a message that reaches
+        # the ground twice arrives with the same seq and is obvious.
+        self.sequence += 1
         success, _ = self.rockblock.send_tracking_data_with_retry(
-            data['lat'], data['lon'], data['altitude'], 
-            data['satellites'], data['battery'], data['temperature'], 
+            self.boot_id, self.sequence,
+            data['lat'], data['lon'], data['altitude'],
+            data['satellites'], data['battery'], data['temperature'],
+            data['fix_age'],
             max_attempts=2
         )
-        
+
+        if self.rockblock.last_session:
+            print(f"   MOMSN: {self.rockblock.last_session['momsn']}")
+
         return success
     
     def update_led(self, data):
@@ -228,12 +291,8 @@ class HABTracker:
                     self.oled.add_text("No battery")
                     
             elif screen == 4:  # Satellite Status
-                if REQUIRE_GPS_FOR_SATELLITE and not data['has_gps_fix']:
-                    self.oled.add_text("Waiting for GPS")
-                    self.oled.add_text(f"Sats: {data['satellites']}")
-                else:
-                    self.oled.add_text(f"Sent: {self.satellite_success_count}")
-                    self.oled.add_text(f"Failed: {self.satellite_fail_count}")
+                self.oled.add_text(f"Sent: {self.satellite_success_count}")
+                self.oled.add_text(f"Failed: {self.satellite_fail_count}")
                     
         except:
             pass
@@ -264,6 +323,12 @@ class HABTracker:
                         print(f"GPS: Searching... Sats: {data['satellites']}")
                 last_status_time = time.time()
             
+            # If the modem never started, keep trying in the background rather
+            # than giving up on the flight.
+            if self.rockblock is None and time.time() >= self.next_modem_retry:
+                self.next_modem_retry = time.time() + MODEM_RETRY_SECONDS
+                self._try_init_modem()
+
             # Check if time to send satellite message
             if SATELLITE_ENABLED and time.time() >= self.next_satellite_time:
                 print(f"\n📡 Satellite transmission...")
@@ -280,8 +345,8 @@ class HABTracker:
                         self.oled.add_text("SENT OK!")
                         self.oled.add_text(f"Total: {self.satellite_success_count}")
                         time.sleep(3)
-                elif data['has_gps_fix'] or not REQUIRE_GPS_FOR_SATELLITE:
-                    # Only count as failure if we actually tried to send
+                else:
+                    # We always attempt a send now, so any failure is a real one
                     self.satellite_fail_count += 1
                     self.next_satellite_time = time.time() + RETRY_FAILED_AFTER_SECONDS
                     print(f"❌ FAILED! Retry in {RETRY_FAILED_AFTER_SECONDS}s")
